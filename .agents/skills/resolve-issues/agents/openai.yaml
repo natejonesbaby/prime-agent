@@ -1,0 +1,4 @@
+interface:
+  display_name: "Resolve Issues"
+  short_description: "Resolve issue backlogs without review churn"
+  default_prompt: "Use $resolve-issues to resolve the scoped issue backlog with managed worktrees and bounded review."

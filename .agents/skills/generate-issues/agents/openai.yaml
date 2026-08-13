@@ -1,0 +1,4 @@
+interface:
+  display_name: "Generate Issues"
+  short_description: "Slice Prime work into stable issues"
+  default_prompt: "Use $generate-issues to create a concise dependency-aware issue set with focused validation."

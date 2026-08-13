@@ -1,0 +1,4 @@
+interface:
+  display_name: "Issue Implementer"
+  short_description: "Implement one scoped issue efficiently"
+  default_prompt: "Use $issue-implementer to implement the assigned issue with focused validation."

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Issue Reviewer"
+  short_description: "Review one issue with bounded scope"
+  default_prompt: "Use $issue-reviewer to review the assigned candidate and return one complete verdict."

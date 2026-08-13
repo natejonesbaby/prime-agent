@@ -1,0 +1,4 @@
+interface:
+  display_name: "Harness Engineering"
+  short_description: "Preserve Prime Agent’s native harness"
+  default_prompt: "Use $harness-engineering to preserve Prime Agent’s upstream-native development harness."
