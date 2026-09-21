@@ -1003,7 +1003,10 @@ describe("AgentSession compaction characterization", () => {
 		expect(harness.session.getFollowUpMessages()).toHaveLength(1);
 
 		await harness.session.prompt("/autonomous off");
-		await harness.session.waitForIdle();
+		const idle = harness.session.waitForIdle();
+		// Idle includes the scheduled callback that observes the cleared continuation.
+		await vi.advanceTimersByTimeAsync(100);
+		await idle;
 		expect(harness.session.getAutonomousStatus().enabled).toBe(false);
 		expect(harness.session.getFollowUpMessages()).toEqual([]);
 

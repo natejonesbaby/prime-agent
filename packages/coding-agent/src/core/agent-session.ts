@@ -1258,6 +1258,7 @@ export class AgentSession {
 	private _turnIntervalAutoRefinePending = false;
 	private _postCompactionContinuationScheduled = false;
 	private _postCompactionContinuationTimer: ReturnType<typeof setTimeout> | undefined;
+	private _postCompactionContinuation: { promise: Promise<void>; finish(): void } | undefined;
 	private _postCompactionContinuationMessages: AgentMessage[] = [];
 	private _scheduledPostCompactionContinuationMessages: AgentMessage[] = [];
 	private _queuedAutonomousThresholdContinuations = new WeakMap<AssistantMessage, AgentMessage>();
@@ -6526,9 +6527,12 @@ export class AgentSession {
 			await this.agent.waitForIdle();
 			const agentEventQueue = this._agentEventQueue;
 			await agentEventQueue;
+			const continuation = this._postCompactionContinuation;
+			await continuation?.promise;
 			if (
 				pump === this._sessionInputPump &&
 				agentEventQueue === this._agentEventQueue &&
+				continuation === this._postCompactionContinuation &&
 				!this._sessionInputPumpRequested &&
 				!this.agent.state.isStreaming &&
 				this.unfinishedActionCount === 0
@@ -7280,6 +7284,7 @@ export class AgentSession {
 		}
 		this._postCompactionContinuationScheduled = false;
 		this._scheduledPostCompactionContinuationMessages = [];
+		this._postCompactionContinuation?.finish();
 	}
 
 	private _discardPendingAutoRefine(options: { cancelPostCompactionContinue?: boolean } = {}): void {
@@ -7379,9 +7384,23 @@ export class AgentSession {
 		}
 		this._postCompactionContinuationScheduled = true;
 		this._scheduledPostCompactionContinuationMessages = [...this._postCompactionContinuationMessages];
+		let resolveContinuation = () => {};
+		const continuation = {
+			promise: new Promise<void>((resolve) => {
+				resolveContinuation = resolve;
+			}),
+			finish: () => {
+				if (this._postCompactionContinuation === continuation) {
+					this._postCompactionContinuation = undefined;
+				}
+				resolveContinuation();
+			},
+		};
+		// Own the delay and the resulting turn, including replacement schedules.
+		this._postCompactionContinuation = continuation;
 		this._postCompactionContinuationTimer = setTimeout(() => {
 			this._postCompactionContinuationTimer = undefined;
-			void this._runScheduledPostCompactionContinue();
+			void this._runScheduledPostCompactionContinue(continuation).finally(continuation.finish);
 		}, 100);
 	}
 
@@ -7390,9 +7409,11 @@ export class AgentSession {
 		return continuationMessages.some((message) => this._postCompactionContinuationMessages.includes(message));
 	}
 
-	private async _runScheduledPostCompactionContinue(): Promise<void> {
+	private async _runScheduledPostCompactionContinue(
+		continuation: NonNullable<AgentSession["_postCompactionContinuation"]>,
+	): Promise<void> {
 		await this._waitForRefineIdle();
-		if (!this._postCompactionContinuationScheduled) {
+		if (this._postCompactionContinuation !== continuation || !this._postCompactionContinuationScheduled) {
 			return;
 		}
 		if (this.isStreaming || this.isCompacting || this.isRetrying || this._queuedWorkPauses.size > 0) {
@@ -7411,7 +7432,7 @@ export class AgentSession {
 		if (this.unfinishedActionCount > 0 || this._sessionInputPumpRequested) {
 			this._scheduleSessionInputPump();
 			await this._sessionInputPump;
-			if (this._postCompactionContinuationScheduled) {
+			if (this._postCompactionContinuation === continuation && this._postCompactionContinuationScheduled) {
 				this._postCompactionContinuationScheduled = false;
 				const shouldReschedule =
 					continuationMessages.length === 0

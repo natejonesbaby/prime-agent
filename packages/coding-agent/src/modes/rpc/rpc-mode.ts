@@ -234,6 +234,8 @@ async function runRpcModeWithConnectionInternal(
 			case "abort":
 				await connection.abort();
 				return success(id, command.type);
+			case "wait_for_headless_completion":
+				return success(id, command.type, await connection.waitForHeadlessCompletion());
 			case "new_session":
 				return success(
 					id,

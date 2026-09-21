@@ -16,6 +16,7 @@ import { AuthStorage } from "../src/core/auth-storage.js";
 import { ModelRegistry } from "../src/core/model-registry.js";
 import { SessionManager } from "../src/core/session-manager.js";
 import { SettingsManager } from "../src/core/settings-manager.js";
+import { InProcessAgentConnection } from "../src/modes/agent-connection/in-process-agent-connection.js";
 import { runRpcMode } from "../src/modes/rpc/rpc-mode.js";
 import { createTestResourceLoader } from "./utilities.js";
 
@@ -189,6 +190,71 @@ describe("RPC prompt response semantics", () => {
 	afterEach(() => {
 		rpcIo.outputLines = [];
 		rpcIo.lineHandler = undefined;
+	});
+
+	it("delegates headless completion and keeps abort available while it waits", async () => {
+		const { lineHandler, session, cleanup } = await startRpcMode({ withAuth: true, responseDelayMs: 0 });
+		let release = () => {};
+		const gate = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		const status = session.getAutonomousStatus();
+		const completion = vi
+			.spyOn(InProcessAgentConnection.prototype, "waitForHeadlessCompletion")
+			.mockImplementation(async () => {
+				await gate;
+				return status;
+			});
+		try {
+			lineHandler(JSON.stringify({ id: "complete", type: "wait_for_headless_completion" }));
+			await vi.waitFor(() => expect(completion).toHaveBeenCalledOnce());
+			expect(parseOutputLines(rpcIo.outputLines).some((record) => record.id === "complete")).toBe(false);
+			lineHandler(JSON.stringify({ id: "abort-wait", type: "abort" }));
+			await vi.waitFor(() =>
+				expect(parseOutputLines(rpcIo.outputLines)).toContainEqual({
+					id: "abort-wait",
+					type: "response",
+					command: "abort",
+					success: true,
+				}),
+			);
+			release();
+			await vi.waitFor(() =>
+				expect(parseOutputLines(rpcIo.outputLines)).toContainEqual({
+					id: "complete",
+					type: "response",
+					command: "wait_for_headless_completion",
+					success: true,
+					data: JSON.parse(JSON.stringify(status)),
+				}),
+			);
+		} finally {
+			release();
+			completion.mockRestore();
+			await cleanup();
+		}
+	});
+
+	it("returns headless completion failures with their command identity", async () => {
+		const { lineHandler, cleanup } = await startRpcMode({ withAuth: true, responseDelayMs: 0 });
+		const completion = vi
+			.spyOn(InProcessAgentConnection.prototype, "waitForHeadlessCompletion")
+			.mockRejectedValue(new Error("completion failed"));
+		try {
+			lineHandler(JSON.stringify({ id: "complete-error", type: "wait_for_headless_completion" }));
+			await vi.waitFor(() =>
+				expect(parseOutputLines(rpcIo.outputLines)).toContainEqual({
+					id: "complete-error",
+					type: "response",
+					command: "wait_for_headless_completion",
+					success: false,
+					error: "completion failed",
+				}),
+			);
+		} finally {
+			completion.mockRestore();
+			await cleanup();
+		}
 	});
 
 	it("emits one failure response when prompt preflight rejects", async () => {
