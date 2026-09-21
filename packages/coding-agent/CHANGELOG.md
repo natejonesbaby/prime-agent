@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Fixed headless idle waits completing before scheduled post-compaction continuations, and exposed the shared completion wait as the stdio RPC `wait_for_headless_completion` command.
+- Fixed IPython startup hanging when kernel output subscription becomes ready after the first request.
 - Fixed URLs not opening on click in fullscreen mode on terminals such as Ghostty; clicking a link in the transcript, dock, or overlays now opens it in the browser.
 
 ## [0.7.2] - 2026-08-11

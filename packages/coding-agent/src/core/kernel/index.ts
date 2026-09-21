@@ -26,8 +26,7 @@ const DELIM = Buffer.from("<IDS|MSG>");
 const PROTOCOL_VERSION = "5.3";
 const PORTS_RESOLVE_TIMEOUT_MS = 5000;
 const READY_TIMEOUT_MS = 5000;
-// Loopback PUB/SUB subscription propagation is usually sub-ms, but keep a small guard before first execute.
-const IOPUB_SUBSCRIBE_DELAY_MS = 50;
+const READY_PROBE_INTERVAL_MS = 100;
 const DEFAULT_MAX_OUTPUT_CHARS = 65536;
 const HOST_REQUEST_DISPOSE_TIMEOUT_MS = 5000;
 const DEFAULT_SNAPSHOT_DEBOUNCE_MS = 1500;
@@ -603,6 +602,7 @@ export class KernelManager {
 	private iopub?: Subscriber;
 	private control?: Dealer;
 	private iopubPumpPromise?: Promise<void>;
+	private readinessProbe?: { requestMsgIds: Set<string>; idle: Deferred<void> };
 	private connection?: ConnectionInfo;
 	private tempDir?: string;
 	private kernelStderr = "";
@@ -771,12 +771,11 @@ export class KernelManager {
 		this.control.connect(`${conn.transport}://${conn.ip}:${conn.control_port}`);
 		this.iopub.subscribe("");
 
-		// ZMQ PUB/SUB slow-joiner: give the subscription a brief chance to reach the kernel before first execute.
-		await sleep(IOPUB_SUBSCRIBE_DELAY_MS);
 		this.startIopubPump();
 
 		try {
 			await this.probeReady();
+			if ((this.state as string) === "shutdown") throw new Error("Kernel was disposed during startup");
 		} catch (e) {
 			const canRetryStartup = (this.state as string) !== "shutdown";
 			await this.shutdown();
@@ -843,37 +842,49 @@ export class KernelManager {
 	private async probeReady(): Promise<void> {
 		const conn = this.connection!;
 		const shell = this.shell!;
-
-		const msg = buildMessage("kernel_info_request", {}, this.session, this.options.username);
-		const requestMsgId = msg.header.msg_id;
-		await shell.send(encode(msg, conn.key));
-
-		const startedAt = Date.now();
-		while (Date.now() - startedAt < READY_TIMEOUT_MS) {
-			if ((this.state as string) === "shutdown" || this.forkedKernelDied()) {
+		let timer: ReturnType<typeof globalThis.setTimeout> | undefined;
+		const deadline = new Promise<never>((_, reject) => {
+			timer = globalThis.setTimeout(() => {
 				const tail = this.kernelStderr.slice(-1024);
-				throw new Error(`Kernel exited during startup. stderr:\n${tail || "(empty)"}`);
+				reject(
+					new Error(
+						`Kernel shell and IOPub did not become ready within ${READY_TIMEOUT_MS}ms. stderr tail:\n${tail || "(empty)"}`,
+					),
+				);
+			}, READY_TIMEOUT_MS);
+		});
+		const probe = { requestMsgIds: new Set<string>(), idle: createDeferred<void>() };
+		this.readinessProbe = probe;
+		try {
+			while (true) {
+				if ((this.state as string) === "shutdown" || this.forkedKernelDied()) {
+					throw new Error("Kernel exited during startup");
+				}
+				const msg = buildMessage("kernel_info_request", {}, this.session, this.options.username);
+				probe.requestMsgIds.add(msg.header.msg_id);
+				await Promise.race([shell.send(encode(msg, conn.key)), deadline]);
+				while (true) {
+					const incoming = decode(await Promise.race([shell.receive(), deadline]));
+					if (
+						incoming?.header.msg_type === "kernel_info_reply" &&
+						incoming.parent_header.msg_id === msg.header.msg_id
+					) {
+						break;
+					}
+				}
+				// Shell readiness alone cannot prove the PUB/SUB subscription reached the kernel.
+				// Retry harmless info requests until their correlated idle is observed too.
+				const ready = await Promise.race([
+					probe.idle.promise.then(() => true),
+					sleep(READY_PROBE_INTERVAL_MS).then(() => false),
+					deadline,
+				]);
+				if (ready) return;
 			}
-
-			const remaining = READY_TIMEOUT_MS - (Date.now() - startedAt);
-			const winner = await Promise.race([
-				shell.receive().then((frames) => ({ kind: "frames" as const, frames })),
-				sleep(remaining).then(() => ({ kind: "timeout" as const })),
-			]);
-			if (winner.kind === "timeout") break;
-
-			const incoming = decode(winner.frames);
-			if (
-				incoming?.header.msg_type === "kernel_info_reply" &&
-				(incoming.parent_header as { msg_id?: string }).msg_id === requestMsgId
-			) {
-				return;
-			}
+		} finally {
+			if (timer) globalThis.clearTimeout(timer);
+			this.readinessProbe = undefined;
 		}
-		const tail = this.kernelStderr.slice(-1024);
-		throw new Error(
-			`Kernel did not respond to kernel_info_request within ${READY_TIMEOUT_MS}ms. stderr tail:\n${tail || "(empty)"}`,
-		);
 	}
 
 	async execute(code: string, opts: ExecuteOptions = {}): Promise<ExecuteResult> {
@@ -1055,6 +1066,14 @@ export class KernelManager {
 	private handleExecutionMessage(incoming: JupyterMessage): void {
 		const execution = this.activeExecution;
 		const parentMessageId = (incoming.parent_header as { msg_id?: string }).msg_id;
+		if (
+			incoming.header.msg_type === "status" &&
+			incoming.content.execution_state === "idle" &&
+			parentMessageId &&
+			this.readinessProbe?.requestMsgIds.has(parentMessageId)
+		) {
+			this.readinessProbe?.idle.resolve();
+		}
 		if (!execution || parentMessageId !== execution.requestMsgId) {
 			if (incoming.header.msg_type === "display_data" || incoming.header.msg_type === "update_display_data") {
 				const content = incoming.content as { data?: Record<string, unknown> };

@@ -156,6 +156,16 @@ If an extension cancelled:
 {"type": "response", "command": "new_session", "success": true, "data": {"cancelled": true}}
 ```
 
+#### wait_for_headless_completion
+
+After the `prompt` response, wait for accepted session work, scheduled post-compaction continuations, and configured autonomous gate retries to finish. Events keep streaming, and `abort` remains available while this command waits.
+
+```json
+{"id": "completion-1", "type": "wait_for_headless_completion"}
+```
+
+The response uses `command: "wait_for_headless_completion"` and returns the current [`AgentAutonomousStatus`](../src/core/autonomous.ts) as `data`. `success: true` means the completion wait finished; inspect terminal messages and autonomous status to determine the task outcome. This command has no built-in timeout. Clients retain their deadline and cancellation policy; paused queued work remains pending until resumed or cleared.
+
 ### State
 
 #### get_state
@@ -817,7 +827,7 @@ Emitted when the agent begins processing a prompt.
 
 ### agent_end
 
-Emitted when the agent completes. Contains all messages generated during this run.
+Emitted when an agent loop completes. Contains all messages generated during that loop. Session-owned compaction and continuations can follow; use `wait_for_headless_completion` to await the session's headless completion boundary.
 
 ```json
 {
@@ -1383,7 +1393,7 @@ def read_events():
         yield json.loads(line)
 
 # Send prompt
-send({"type": "prompt", "message": "Hello!"})
+send({"id": "prompt-1", "type": "prompt", "message": "Hello!"})
 
 # Process events
 for event in read_events():
@@ -1392,7 +1402,14 @@ for event in read_events():
         if delta.get("type") == "text_delta":
             print(delta["delta"], end="", flush=True)
     
-    if event.get("type") == "agent_end":
+    if event.get("type") == "response" and event.get("id") == "prompt-1":
+        if not event.get("success"):
+            raise RuntimeError(event.get("error"))
+        send({"id": "completion-1", "type": "wait_for_headless_completion"})
+
+    if event.get("type") == "response" and event.get("id") == "completion-1":
+        if not event.get("success"):
+            raise RuntimeError(event.get("error"))
         print()
         break
 ```
